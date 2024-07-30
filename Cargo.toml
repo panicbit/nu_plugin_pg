@@ -4,6 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-nu-plugin = "0.86.0"
-nu-protocol = { version = "0.86.0", features = ["plugin"] }
-postgres = "0.19.7"
+nu-plugin = "0.96.1"
+nu-protocol = { version = "0.96.1", features = ["plugin"] }
+postgres = "0.19.8"
