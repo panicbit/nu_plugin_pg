@@ -129,13 +129,8 @@ impl Args {
 fn load_config(engine: &EngineInterface) -> Result<postgres::Config, ShellError> {
     let pg_url = env_var("PG_URL", engine)?;
     let config = pg_url.parse::<postgres::Config>().map_err(|err| {
-        ShellError::GenericError {
-            error: err.to_string(),
-            msg: "The allowed syntax for `PG_URL` can be found at\nhttps://docs.rs/postgres/0.19.7/postgres/config/struct.Config.html#url".into(),
-            span: None,
-            help: None,
-            inner: vec![],
-         }
+        LabeledError::new(err.to_string())
+            .with_help("The allowed syntax for `PG_URL` can be found at\nhttps://docs.rs/postgres/0.19.7/postgres/config/struct.Config.html#url")
     })?;
 
     Ok(config)
