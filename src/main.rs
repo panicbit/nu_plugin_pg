@@ -98,9 +98,7 @@ impl SimplePluginCommand for PgCommand {
                     Type::FLOAT4 => {
                         row_get_opt(row, i, |value: f32| Value::float(value.into(), span))
                     }
-                    Type::FLOAT8 => {
-                        row_get_opt(row, i, |value: f64| Value::float(value.into(), span))
-                    }
+                    Type::FLOAT8 => row_get_opt(row, i, |value: f64| Value::float(value, span)),
                     Type::TIMESTAMPTZ => row_get_opt(row, i, |value: DateTime<FixedOffset>| {
                         Value::date(value, span)
                     }),
