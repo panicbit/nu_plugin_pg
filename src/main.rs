@@ -9,7 +9,7 @@ use nu_protocol::{LabeledError, Record, ShellError, Signature, Span, SyntaxShape
 use postgres::{
     config::SslMode,
     fallible_iterator::FallibleIterator,
-    types::{FromSql, ToSql, Type},
+    types::{FromSql, Oid, ToSql, Type},
     Client, GenericClient, NoTls, SimpleQueryMessage,
 };
 use rustls::RootCertStore;
@@ -86,7 +86,7 @@ impl SimplePluginCommand for PgCommand {
 
             for (i, col) in row.columns().iter().enumerate() {
                 let value = match *col.type_() {
-                    Type::TEXT | Type::VARCHAR | Type::BPCHAR => {
+                    Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME => {
                         row_get_opt(row, i, |value: String| Value::string(value, span))
                     }
                     Type::BOOL => row_get_opt(row, i, |value: bool| Value::bool(value, span)),
@@ -125,9 +125,11 @@ impl SimplePluginCommand for PgCommand {
 
                         Value::record(time, span)
                     }),
+                    Type::OID => row_get_opt(row, i, |value: Oid| Value::int(value.into(), span)),
                     ref r#type => {
                         return Err(LabeledError::new(format!(
-                            "unsupported column type: {type}"
+                            "column `{}` has unsupported type `{type}`",
+                            col.name(),
                         )))
                     }
                 };
