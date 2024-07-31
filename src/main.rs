@@ -13,6 +13,7 @@ use postgres::{
     Client, GenericClient, NoTls, SimpleQueryMessage,
 };
 use rustls::RootCertStore;
+use serde_json::Number;
 use tokio_postgres_rustls::MakeRustlsConnect;
 
 fn main() {
@@ -75,8 +76,6 @@ impl SimplePluginCommand for PgCommand {
             .query_raw(&args.query, params)
             .map_err(from_pg_error)?;
 
-        println!("Affected rows: {:?}", rows.rows_affected());
-
         let mut nu_rows = Vec::new();
 
         while let Some(row) = rows.next().transpose() {
@@ -99,6 +98,9 @@ impl SimplePluginCommand for PgCommand {
                         row_get_opt(row, i, |value: f32| Value::float(value.into(), span))
                     }
                     Type::FLOAT8 => row_get_opt(row, i, |value: f64| Value::float(value, span)),
+                    Type::JSON | Type::JSONB => {
+                        row_get_opt(row, i, |value: serde_json::Value| json_to_nu(value))
+                    }
                     Type::TIMESTAMPTZ => row_get_opt(row, i, |value: DateTime<FixedOffset>| {
                         Value::date(value, span)
                     }),
@@ -242,4 +244,39 @@ fn env_var_opt(name: &str, engine: &EngineInterface) -> Result<Option<String>, S
     };
 
     value.into_string().map(Some)
+}
+
+fn json_to_nu(value: serde_json::Value) -> Value {
+    let span = Span::unknown();
+
+    match value {
+        serde_json::Value::Null => Value::nothing(span),
+        serde_json::Value::Bool(value) => Value::bool(value, span),
+        serde_json::Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                Value::int(value, span)
+            } else if let Some(value) = value.as_f64() {
+                Value::float(value, span)
+            } else {
+                Value::string(value.to_string(), span)
+            }
+        }
+        serde_json::Value::String(value) => Value::string(value, span),
+        serde_json::Value::Array(values) => {
+            let values = values.into_iter().map(json_to_nu).collect();
+
+            Value::list(values, span)
+        }
+        serde_json::Value::Object(values) => {
+            let mut record = Record::with_capacity(values.len());
+
+            for (k, v) in values {
+                let v = json_to_nu(v);
+
+                record.insert(k, v);
+            }
+
+            Value::record(record, span)
+        }
+    }
 }

@@ -1248,6 +1248,7 @@ dependencies = [
  "nu-protocol",
  "postgres",
  "rustls",
+ "serde_json",
  "tokio",
  "tokio-postgres-rustls",
  "webpki-roots",
@@ -1432,6 +1433,8 @@ dependencies = [
  "chrono",
  "fallible-iterator",
  "postgres-protocol",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
