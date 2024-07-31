@@ -104,7 +104,7 @@ impl SimplePluginCommand for PgCommand {
                         date_time.insert("year", Value::int(value.year().into(), span));
                         date_time.insert("month", Value::int(value.month().into(), span));
                         date_time.insert("day", Value::int(value.day().into(), span));
-                        date_time.insert("hour", Value::duration(value.hour().into(), span));
+                        date_time.insert("hour", Value::int(value.hour().into(), span));
                         date_time.insert("minute", Value::int(value.minute().into(), span));
                         date_time.insert("second", Value::int(value.second().into(), span));
                         date_time.insert("nanosecond", Value::int(value.nanosecond().into(), span));
