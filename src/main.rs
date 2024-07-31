@@ -1,11 +1,17 @@
 use std::{env, time::Duration};
 
+use chrono::{DateTime, Datelike, FixedOffset, NaiveDateTime, NaiveTime, Timelike};
 use nu_plugin::{
     serve_plugin, EngineInterface, EvaluatedCall, MsgPackSerializer, PluginCommand,
     SimplePluginCommand,
 };
-use nu_protocol::{LabeledError, ShellError, Signature, Span, SyntaxShape, Value};
-use postgres::{config::SslMode, Client, NoTls};
+use nu_protocol::{LabeledError, Record, ShellError, Signature, Span, SyntaxShape, Value};
+use postgres::{
+    config::SslMode,
+    fallible_iterator::FallibleIterator,
+    types::{FromSql, ToSql, Type},
+    Client, GenericClient, NoTls, SimpleQueryMessage,
+};
 use rustls::RootCertStore;
 use tokio_postgres_rustls::MakeRustlsConnect;
 
@@ -62,10 +68,93 @@ impl SimplePluginCommand for PgCommand {
 
         config.connect_timeout(Duration::from_secs(30));
 
-        let client = connect(config)?;
+        let mut client = connect(config)?;
 
-        Ok(Value::nothing(Span::unknown()))
+        let params: [&dyn ToSql; 0] = [];
+        let mut rows = client
+            .query_raw(&args.query, params)
+            .map_err(from_pg_error)?;
+
+        println!("Affected rows: {:?}", rows.rows_affected());
+
+        let mut nu_rows = Vec::new();
+
+        while let Some(row) = rows.next().transpose() {
+            let row = &row.map_err(from_pg_error)?;
+            let mut nu_row = Record::with_capacity(row.len());
+
+            let span = Span::unknown();
+
+            for (i, col) in row.columns().iter().enumerate() {
+                let value = match *col.type_() {
+                    Type::TEXT => row_get_opt(row, i, |value: String| {
+                        Value::string(value, span)
+                    }),
+                    Type::INT4 => row_get_opt(row, i, |value: i32| {
+                        Value::int(value.into(), span)
+                    }),
+                    Type::INT8 => row_get_opt(row, i, |value: i64| {
+                        Value::int(value, span)
+                    }),
+                    Type::TIMESTAMPTZ => row_get_opt(row, i, |value: DateTime<FixedOffset>| {
+                        Value::date(value, span)
+                    }),
+                    Type::TIMESTAMP => row_get_opt(row, i, |value: NaiveDateTime| {
+                        let mut date_time = Record::with_capacity(6);
+                        date_time.insert("year", Value::int(value.year().into(), span));
+                        date_time.insert("month", Value::int(value.month().into(), span));
+                        date_time.insert("day", Value::int(value.day().into(), span));
+                        date_time.insert("hour", Value::duration(value.hour().into(), span));
+                        date_time.insert("minute", Value::int(value.minute().into(), span));
+                        date_time.insert("second", Value::int(value.second().into(), span));
+                        date_time.insert("nanosecond", Value::int(value.nanosecond().into(), span));
+
+                        Value::record(date_time, span)
+                    }),
+                    Type::TIME => row_get_opt(row, i, |value: NaiveTime| {
+                        let mut time = Record::with_capacity(4);
+                        time.insert("hour", Value::duration(value.hour().into(), span));
+                        time.insert("minute", Value::int(value.minute().into(), span));
+                        time.insert("second", Value::int(value.second().into(), span));
+                        time.insert("nanosecond", Value::int(value.nanosecond().into(), span));
+
+                        Value::record(time, span)
+                    }),
+                    ref r#type => {
+                        return Err(LabeledError::new(format!(
+                            "unsupported column type: {type}"
+                        )))
+                    }
+                };
+
+                nu_row.insert(col.name(), value);
+            }
+
+            nu_rows.push(Value::record(nu_row, span));
+        }
+
+        Ok(Value::list(nu_rows, Span::unknown()))
     }
+}
+
+fn row_get_opt<'a, T: FromSql<'a>>(
+    row: &'a postgres::Row,
+    i: usize,
+    f: impl FnOnce(T) -> Value,
+) -> Value {
+    row.get::<_, Option<T>>(i)
+        .map(f)
+        .unwrap_or_else(|| Value::nothing(Span::unknown()))
+}
+
+fn from_pg_error(err: postgres::Error) -> LabeledError {
+    let Some(db_err) = err.as_db_error() else {
+        return LabeledError::new(err.to_string());
+    };
+
+    let msg = db_err.to_string();
+
+    LabeledError::new(msg).with_code(db_err.code().code())
 }
 
 fn connect(config: postgres::Config) -> Result<Client, LabeledError> {
