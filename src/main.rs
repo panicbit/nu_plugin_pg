@@ -87,14 +87,29 @@ impl SimplePluginCommand for PgCommand {
 
             for (i, col) in row.columns().iter().enumerate() {
                 let value = match *col.type_() {
-                    Type::TEXT => row_get_opt(row, i, |value: String| {
+                    Type::TEXT | Type::VARCHAR | Type::BPCHAR => row_get_opt(row, i, |value: String| {
                         Value::string(value, span)
+                    }),
+                    Type::BOOL => row_get_opt(row, i, |value: bool| {
+                        Value::bool(value, span)
+                    }),
+                    Type::CHAR => row_get_opt(row, i, |value: i8| {
+                        Value::int(value.into(), span)
+                    }),
+                    Type::INT2 => row_get_opt(row, i, |value: i16| {
+                        Value::int(value.into(), span)
                     }),
                     Type::INT4 => row_get_opt(row, i, |value: i32| {
                         Value::int(value.into(), span)
                     }),
                     Type::INT8 => row_get_opt(row, i, |value: i64| {
                         Value::int(value, span)
+                    }),
+                    Type::FLOAT4 => row_get_opt(row, i, |value: f32| {
+                        Value::float(value.into(), span)
+                    }),
+                    Type::FLOAT8 => row_get_opt(row, i, |value: f64| {
+                        Value::float(value.into(), span)
                     }),
                     Type::TIMESTAMPTZ => row_get_opt(row, i, |value: DateTime<FixedOffset>| {
                         Value::date(value, span)
