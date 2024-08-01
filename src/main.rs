@@ -81,7 +81,7 @@ impl SimplePluginCommand for PgCommand {
 
         config.connect_timeout(Duration::from_secs(30));
 
-        let mut client = connect(config)?;
+        let mut client = config.connect(tls_connector()).map_err(from_pg_error)?;
 
         let mut output_values = Vec::new();
 
@@ -226,39 +226,6 @@ fn from_pg_error(err: postgres::Error) -> LabeledError {
     let msg = db_err.to_string();
 
     LabeledError::new(msg).with_code(db_err.code().code())
-}
-
-fn connect(config: postgres::Config) -> Result<Client, LabeledError> {
-    match config.get_ssl_mode() {
-        SslMode::Disable => config
-            .connect(NoTls)
-            .map_err(|err| LabeledError::new(err.to_string())),
-        SslMode::Prefer => {
-            let error_without_tls = match config.connect(tls_connector()) {
-                Ok(client) => return Ok(client),
-                Err(error_without_tls) => error_without_tls,
-            };
-
-            let error_with_tls = match config.connect(tls_connector()) {
-                Ok(client) => return Ok(client),
-                Err(error_with_tls) => error_with_tls,
-            };
-
-            let combined_error = LabeledError::new("failed to connect")
-                .with_inner(LabeledError::new(format!(
-                    "without tls: {error_without_tls}"
-                )))
-                .with_inner(LabeledError::new(format!("with tls: {error_with_tls}")));
-
-            Err(combined_error)
-        }
-        SslMode::Require => config
-            .connect(tls_connector())
-            .map_err(|err| LabeledError::new(err.to_string())),
-        ssl_mode => Err(LabeledError::new(format!(
-            "ssl mode `{ssl_mode:?}` is not implemented"
-        ))),
-    }
 }
 
 fn tls_connector() -> MakeRustlsConnect {
