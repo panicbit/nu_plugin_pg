@@ -1,4 +1,4 @@
-use std::{env, time::Duration};
+use std::{env, io::Write, time::Duration};
 
 use chrono::{DateTime, Datelike, FixedOffset, NaiveDateTime, NaiveTime, Timelike};
 use nu_plugin::{
@@ -6,18 +6,18 @@ use nu_plugin::{
     SimplePluginCommand,
 };
 use nu_protocol::{LabeledError, Record, ShellError, Signature, Span, SyntaxShape, Value};
+use pg_query::NodeEnum;
 use postgres::{
     config::SslMode,
     fallible_iterator::FallibleIterator,
     types::{FromSql, Oid, ToSql, Type},
-    Client, GenericClient, NoTls, SimpleQueryMessage,
+    Client, NoTls,
 };
 use rustls::RootCertStore;
-use serde_json::Number;
 use tokio_postgres_rustls::MakeRustlsConnect;
 
 fn main() {
-    serve_plugin(&mut PgPlugin::new(), MsgPackSerializer);
+    serve_plugin(&PgPlugin::new(), MsgPackSerializer);
 }
 
 struct PgPlugin {}
@@ -65,83 +65,147 @@ impl SimplePluginCommand for PgCommand {
         input: &Value,
     ) -> Result<Value, LabeledError> {
         let args = Args::parse(call)?;
-        let mut config = load_config(&engine)?;
+        let mut config = load_config(engine)?;
+
+        let input = match input {
+            Value::Nothing { .. } => b"",
+            Value::String { val, .. } => val.as_bytes(),
+            Value::Binary { val, .. } => val.as_slice(),
+            _ => {
+                return Err(LabeledError::new(format!(
+                    "expected `string` or `binary` input, but got `{}`",
+                    input.get_type(),
+                )))
+            }
+        };
 
         config.connect_timeout(Duration::from_secs(30));
 
         let mut client = connect(config)?;
 
-        let params: [&dyn ToSql; 0] = [];
-        let mut rows = client
-            .query_raw(&args.query, params)
-            .map_err(from_pg_error)?;
+        let mut output_values = Vec::new();
 
-        let mut nu_rows = Vec::new();
+        let parse_result =
+            pg_query::parse(&args.query).map_err(|err| LabeledError::new(err.to_string()))?;
 
-        while let Some(row) = rows.next().transpose() {
-            let row = &row.map_err(from_pg_error)?;
-            let mut nu_row = Record::with_capacity(row.len());
+        for stmt in &parse_result.protobuf.stmts {
+            let stmt = stmt.stmt.as_ref().unwrap();
+            let node = stmt.node.as_ref().unwrap();
+            let query = stmt
+                .deparse()
+                .map_err(|err| LabeledError::new(err.to_string()))?;
 
-            let span = Span::unknown();
+            match node {
+                NodeEnum::SelectStmt(_) => {
+                    let value = execute_query(&mut client, &query)?;
 
-            for (i, col) in row.columns().iter().enumerate() {
-                let value = match *col.type_() {
-                    Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME => {
-                        row_get_opt(row, i, |value: String| Value::string(value, span))
+                    output_values.push(value);
+                }
+                NodeEnum::CopyStmt(stmt) => {
+                    if !stmt.is_from && !stmt.is_program {
+                        return Err(LabeledError::new("`COPY … TO STDOUT` is not supported"));
                     }
-                    Type::BOOL => row_get_opt(row, i, |value: bool| Value::bool(value, span)),
-                    Type::CHAR => row_get_opt(row, i, |value: i8| Value::int(value.into(), span)),
-                    Type::INT2 => row_get_opt(row, i, |value: i16| Value::int(value.into(), span)),
-                    Type::INT4 => row_get_opt(row, i, |value: i32| Value::int(value.into(), span)),
-                    Type::INT8 => row_get_opt(row, i, |value: i64| Value::int(value, span)),
-                    Type::FLOAT4 => {
-                        row_get_opt(row, i, |value: f32| Value::float(value.into(), span))
-                    }
-                    Type::FLOAT8 => row_get_opt(row, i, |value: f64| Value::float(value, span)),
-                    Type::JSON | Type::JSONB => {
-                        row_get_opt(row, i, |value: serde_json::Value| json_to_nu(value))
-                    }
-                    Type::TIMESTAMPTZ => row_get_opt(row, i, |value: DateTime<FixedOffset>| {
-                        Value::date(value, span)
-                    }),
-                    Type::TIMESTAMP => row_get_opt(row, i, |value: NaiveDateTime| {
-                        let mut date_time = Record::with_capacity(6);
-                        date_time.insert("year", Value::int(value.year().into(), span));
-                        date_time.insert("month", Value::int(value.month().into(), span));
-                        date_time.insert("day", Value::int(value.day().into(), span));
-                        date_time.insert("hour", Value::int(value.hour().into(), span));
-                        date_time.insert("minute", Value::int(value.minute().into(), span));
-                        date_time.insert("second", Value::int(value.second().into(), span));
-                        date_time.insert("nanosecond", Value::int(value.nanosecond().into(), span));
 
-                        Value::record(date_time, span)
-                    }),
-                    Type::TIME => row_get_opt(row, i, |value: NaiveTime| {
-                        let mut time = Record::with_capacity(4);
-                        time.insert("hour", Value::duration(value.hour().into(), span));
-                        time.insert("minute", Value::int(value.minute().into(), span));
-                        time.insert("second", Value::int(value.second().into(), span));
-                        time.insert("nanosecond", Value::int(value.nanosecond().into(), span));
-
-                        Value::record(time, span)
-                    }),
-                    Type::OID => row_get_opt(row, i, |value: Oid| Value::int(value.into(), span)),
-                    ref r#type => {
-                        return Err(LabeledError::new(format!(
-                            "column `{}` has unsupported type `{type}`",
-                            col.name(),
-                        )))
+                    if !stmt.is_from || stmt.is_program {
+                        execute_query(&mut client, &query)?;
+                        continue;
                     }
-                };
 
-                nu_row.insert(col.name(), value);
+                    let mut writer = client
+                        .copy_in(&query)
+                        .map_err(|err| LabeledError::new(err.to_string()))?;
+
+                    writer
+                        .write_all(input)
+                        .map_err(|err| LabeledError::new(err.to_string()))?;
+
+                    writer
+                        .finish()
+                        .map_err(|err| LabeledError::new(err.to_string()))?;
+                }
+                _ => {
+                    execute_query(&mut client, &query)?;
+                }
             }
-
-            nu_rows.push(Value::record(nu_row, span));
         }
 
-        Ok(Value::list(nu_rows, Span::unknown()))
+        // execute_query(&mut client, &args.query)
+
+        if output_values.len() == 1 {
+            Ok(output_values.into_iter().next().unwrap())
+        } else {
+            Ok(Value::list(output_values, Span::unknown()))
+        }
     }
+}
+
+fn execute_query(client: &mut Client, query: &str) -> Result<Value, LabeledError> {
+    let params: [&dyn ToSql; 0] = [];
+    let mut rows = client.query_raw(query, params).map_err(from_pg_error)?;
+
+    let mut nu_rows = Vec::new();
+
+    while let Some(row) = rows.next().transpose() {
+        let row = &row.map_err(from_pg_error)?;
+        let mut nu_row = Record::with_capacity(row.len());
+
+        let span = Span::unknown();
+
+        for (i, col) in row.columns().iter().enumerate() {
+            let value = match *col.type_() {
+                Type::TEXT | Type::VARCHAR | Type::BPCHAR | Type::NAME => {
+                    row_get_opt(row, i, |value: String| Value::string(value, span))
+                }
+                Type::BOOL => row_get_opt(row, i, |value: bool| Value::bool(value, span)),
+                Type::CHAR => row_get_opt(row, i, |value: i8| Value::int(value.into(), span)),
+                Type::INT2 => row_get_opt(row, i, |value: i16| Value::int(value.into(), span)),
+                Type::INT4 => row_get_opt(row, i, |value: i32| Value::int(value.into(), span)),
+                Type::INT8 => row_get_opt(row, i, |value: i64| Value::int(value, span)),
+                Type::FLOAT4 => row_get_opt(row, i, |value: f32| Value::float(value.into(), span)),
+                Type::FLOAT8 => row_get_opt(row, i, |value: f64| Value::float(value, span)),
+                Type::JSON | Type::JSONB => {
+                    row_get_opt(row, i, |value: serde_json::Value| json_to_nu(value))
+                }
+                Type::TIMESTAMPTZ => row_get_opt(row, i, |value: DateTime<FixedOffset>| {
+                    Value::date(value, span)
+                }),
+                Type::TIMESTAMP => row_get_opt(row, i, |value: NaiveDateTime| {
+                    let mut date_time = Record::with_capacity(6);
+                    date_time.insert("year", Value::int(value.year().into(), span));
+                    date_time.insert("month", Value::int(value.month().into(), span));
+                    date_time.insert("day", Value::int(value.day().into(), span));
+                    date_time.insert("hour", Value::int(value.hour().into(), span));
+                    date_time.insert("minute", Value::int(value.minute().into(), span));
+                    date_time.insert("second", Value::int(value.second().into(), span));
+                    date_time.insert("nanosecond", Value::int(value.nanosecond().into(), span));
+
+                    Value::record(date_time, span)
+                }),
+                Type::TIME => row_get_opt(row, i, |value: NaiveTime| {
+                    let mut time = Record::with_capacity(4);
+                    time.insert("hour", Value::duration(value.hour().into(), span));
+                    time.insert("minute", Value::int(value.minute().into(), span));
+                    time.insert("second", Value::int(value.second().into(), span));
+                    time.insert("nanosecond", Value::int(value.nanosecond().into(), span));
+
+                    Value::record(time, span)
+                }),
+                Type::OID => row_get_opt(row, i, |value: Oid| Value::int(value.into(), span)),
+                ref r#type => {
+                    return Err(LabeledError::new(format!(
+                        "column `{}` has unsupported type `{type}`",
+                        col.name(),
+                    )))
+                }
+            };
+
+            nu_row.insert(col.name(), value);
+        }
+
+        nu_rows.push(Value::record(nu_row, span));
+    }
+
+    Ok(Value::list(nu_rows, Span::unknown()))
 }
 
 fn row_get_opt<'a, T: FromSql<'a>>(
