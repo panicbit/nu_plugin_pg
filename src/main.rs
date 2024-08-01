@@ -8,10 +8,9 @@ use nu_plugin::{
 use nu_protocol::{LabeledError, Record, ShellError, Signature, Span, SyntaxShape, Value};
 use pg_query::NodeEnum;
 use postgres::{
-    config::SslMode,
     fallible_iterator::FallibleIterator,
     types::{FromSql, Oid, ToSql, Type},
-    Client, NoTls,
+    Client,
 };
 use rustls::RootCertStore;
 use tokio_postgres_rustls::MakeRustlsConnect;
@@ -59,7 +58,7 @@ impl SimplePluginCommand for PgCommand {
 
     fn run(
         &self,
-        plugin: &PgPlugin,
+        _plugin: &PgPlugin,
         engine: &EngineInterface,
         call: &EvaluatedCall,
         input: &Value,
